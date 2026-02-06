@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+backend/venv/
+backend/output.log
+backend/startup_error.log
+backend/debug_import.py
+backend/output.log
+
+# Secrets
+.env
+backend/.env
+frontend/.env
+
+# Logs
+*.log
+backend.log
+frontend.log
+
+# Node / Frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# OS
+.DS_Store
+Thumbs.db
