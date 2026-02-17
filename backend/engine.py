@@ -1,15 +1,20 @@
 import random
-from typing import List, Dict, Optional
-from models import GameState, Player, Card, GameStage, ActionType, PlayerAction
-from agents import BaseAgent, RandomAgent, CallStationAgent, LLMAgent
+from collections import defaultdict
+from typing import Dict, List, Optional, Set, Tuple
+
+from agents import BaseAgent, CallStationAgent, LLMAgent, RandomAgent
+from models import ActionType, Card, GameStage, GameState, Player, PlayerAction
 
 try:
-    from treys import Deck as TreysDeck, Evaluator, Card as TreysCard
+    from treys import Evaluator, Card as TreysCard
 except ImportError:
     print("Warning: treys not found. Evaluation will be disabled.")
-    TreysDeck, Evaluator, TreysCard = None, None, None
+    Evaluator, TreysCard = None, None
+
 
 class Engine:
+    MAX_LOG_ENTRIES = 500
+
     def __init__(self, n_players=8):
         self.n_players = n_players
         self.players: List[Player] = []
@@ -25,9 +30,12 @@ class Engine:
         self.logs: List[str] = []
         self.hand_count = 0
         self.winners: List[int] = []
-        
+        self.pending_to_act: Set[int] = set()
+
         # Agents map: player_id -> Agent
         self.agents: Dict[int, BaseAgent] = {}
+        self.agent_types: Dict[int, str] = {}
+        self.agent_profiles: Dict[int, Optional[str]] = {}
 
         # Initialize players and agents
         for i in range(n_players):
@@ -41,24 +49,105 @@ class Engine:
                 total_hand_bet=0,
                 stats={"wins": 0, "hands_played": 0}
             ))
-            # Assign LLMAgent with profiles
+            # Default lineup: 2 LLM players + others random
             if i == 0:
-                self.agents[i] = LLMAgent(player_id=i, profile="AI1")
+                self.set_agent_config(i, agent_type="llm", profile="AI1")
             elif i == 1:
-                self.agents[i] = LLMAgent(player_id=i, profile="AI2")
+                self.set_agent_config(i, agent_type="llm", profile="AI2")
             else:
-                self.agents[i] = RandomAgent(player_id=i)
-            
+                self.set_agent_config(i, agent_type="random")
+
         if Evaluator:
             self.evaluator = Evaluator()
         else:
             self.evaluator = None
 
+    def _build_agent(self, player_id: int, agent_type: str, profile: Optional[str] = None) -> BaseAgent:
+        normalized = agent_type.strip().lower()
+        if normalized == "llm":
+            return LLMAgent(player_id=player_id, profile=profile)
+        if normalized == "call_station":
+            return CallStationAgent(player_id=player_id)
+        if normalized == "random":
+            return RandomAgent(player_id=player_id)
+        raise ValueError(f"Unsupported agent type: {agent_type}")
+
+    def set_agent_config(self, player_id: int, agent_type: str, profile: Optional[str] = None):
+        if player_id < 0 or player_id >= self.n_players:
+            raise ValueError(f"Invalid player id: {player_id}")
+        normalized = agent_type.strip().lower()
+        clean_profile = profile.strip() if isinstance(profile, str) and profile.strip() else None
+        if normalized != "llm":
+            clean_profile = None
+        self.agents[player_id] = self._build_agent(player_id, normalized, clean_profile)
+        self.agent_types[player_id] = normalized
+        self.agent_profiles[player_id] = clean_profile
+        config_log = (
+            f"[Config] Player {player_id} -> agent={normalized}"
+            f"{f', profile={clean_profile}' if clean_profile else ''}"
+        )
+        self._log(config_log)
+        print(config_log)
+
+    def get_agent_configs(self) -> List[Dict[str, Optional[str]]]:
+        configs: List[Dict[str, Optional[str]]] = []
+        for p in self.players:
+            configs.append(
+                {
+                    "player_id": p.id,
+                    "agent_type": self.agent_types.get(p.id, "random"),
+                    "profile": self.agent_profiles.get(p.id),
+                }
+            )
+        return configs
+
+    def set_all_agents_llm(self, profiles: Optional[List[Optional[str]]] = None):
+        for i in range(self.n_players):
+            profile = None
+            if profiles and i < len(profiles):
+                profile = profiles[i]
+            self.set_agent_config(i, agent_type="llm", profile=profile)
+
+    def _log(self, message: str):
+        self.logs.append(message)
+        if len(self.logs) > self.MAX_LOG_ENTRIES:
+            self.logs = self.logs[-self.MAX_LOG_ENTRIES :]
+
     def _reset_deck(self):
-        suits = ['s', 'h', 'd', 'c']
-        ranks = ['2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A']
+        suits = ["s", "h", "d", "c"]
+        ranks = ["2", "3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K", "A"]
         self.deck = [Card(suit=s, rank=r) for s in suits for r in ranks]
         random.shuffle(self.deck)
+
+    def _can_player_act(self, player: Player) -> bool:
+        return player.is_active and not player.is_all_in
+
+    def _active_players(self) -> List[Player]:
+        return [p for p in self.players if p.is_active]
+
+    def _reset_betting_round(self):
+        self.pending_to_act = {p.id for p in self.players if self._can_player_act(p)}
+
+    def _find_next_actor(self, start_idx: int) -> Optional[int]:
+        if not self.pending_to_act:
+            return None
+
+        for offset in range(1, self.n_players + 1):
+            idx = (start_idx + offset) % self.n_players
+            player = self.players[idx]
+            if player.id in self.pending_to_act and self._can_player_act(player):
+                return idx
+        return None
+
+    def _is_betting_round_complete(self) -> bool:
+        acting_players = [p for p in self.players if self._can_player_act(p)]
+        if not acting_players:
+            return True
+
+        if self.pending_to_act:
+            return False
+
+        return all(p.current_bet == self.highest_bet for p in acting_players)
 
     def start_new_hand(self):
         self._reset_deck()
@@ -67,38 +156,42 @@ class Engine:
         self.stage = GameStage.PREFLOP
         self.winners = []
         self.hand_count += 1
-        
-        self.logs.append(f"--- Hand #{self.hand_count} Started ---")
-        
+
+        self._log(f"--- Hand #{self.hand_count} Started ---")
+
         self.dealer_idx = (self.dealer_idx + 1) % self.n_players
         # SB/BB
         sb_idx = (self.dealer_idx + 1) % self.n_players
         bb_idx = (self.dealer_idx + 2) % self.n_players
-        
+
         for p in self.players:
             p.cards = []
             p.current_bet = 0
             p.is_active = (p.chips > 0)
             p.is_all_in = False
             p.last_action = ""
+            p.thought = ""
             p.total_hand_bet = 0
-            
+
         # Blinds
         self.highest_bet = self.min_bet
         self._post_blind(sb_idx, self.min_bet // 2)
         self._post_blind(bb_idx, self.min_bet)
-        self.last_raiser_idx = bb_idx # Betting ends when it returns to BB (if no raise)
-        
+        self.last_raiser_idx = bb_idx
+
         # Deal
         for _ in range(2):
             for p in self.players:
                 if p.is_active:
                     p.cards.append(self.deck.pop())
-        
+
         # Action starts UTG
         self.current_player_idx = (bb_idx + 1) % self.n_players
-        self._advance_to_active_player()
-        
+        self._reset_betting_round()
+        next_actor = self._find_next_actor((self.current_player_idx - 1) % self.n_players)
+        if next_actor is not None:
+            self.current_player_idx = next_actor
+
         return self.get_state()
 
     def _post_blind(self, player_idx, amount):
@@ -108,146 +201,110 @@ class Engine:
         p.current_bet = actual
         self.pot += actual
         p.total_hand_bet += actual
+        p.is_all_in = p.chips == 0
         p.last_action = f"Blind ${actual}"
-        self.logs.append(f"{p.name} posts blind ${actual}")
-
-    def _advance_to_active_player(self):
-        start_idx = self.current_player_idx
-        while not self.players[self.current_player_idx].is_active or self.players[self.current_player_idx].is_all_in:
-             self.current_player_idx = (self.current_player_idx + 1) % self.n_players
-             if self.current_player_idx == start_idx:
-                 # Should check for showdown if everyone all-in/folded
-                 break
+        self._log(f"{p.name} posts blind ${actual}")
 
     async def step(self):
         """Execute one turn/step of the game."""
-        state = self.get_state()
-        
-        # 0. Check for Showdown/Terminated
         if self.stage == GameStage.SHOWDOWN:
-            return state
+            return self.get_state()
 
-        # 1. Check if Betting Round Complete
-        # Condition: Current player == Last Raiser AND (Current player has matched or is all-in)
-        # Actually, simpler: if we circled back to last_raiser_idx and everyone equalized?
-        # Let's verify simpler "Round End" condition: 
-        #   If matches highest bet, we typically move next... 
-        #   Real logic: if current == last_raiser_idx (and he checked/called), round over
-        #   BUT: Preflop BB option.
-        
-        # Simplified Logic for Prototype:
-        # Check round completion BEFORE asking action? No, after action.
-        
-        # 2. Get Agent Action
         curr_player = self.players[self.current_player_idx]
-        agent = self.agents[curr_player.id]
-        action, thought = await agent.get_action(state)
-        
-        # Update Thought
-        curr_player.thought = thought
+        if not self._can_player_act(curr_player):
+            next_idx = self._find_next_actor(self.current_player_idx)
+            if next_idx is None:
+                self._runout_to_showdown()
+                return self.get_state()
+            self.current_player_idx = next_idx
+            curr_player = self.players[self.current_player_idx]
 
-        # Normalize Action (Check if valid)
+        agent = self.agents[curr_player.id]
+        state = self.get_state()
+        action, thought = await agent.get_action(state)
+
+        # Normalize Action (force invalid intents into legal moves)
         original_type = action.type
         if action.type == ActionType.CHECK and self.highest_bet > curr_player.current_bet:
             action.type = ActionType.CALL
         if action.type == ActionType.CALL and self.highest_bet == curr_player.current_bet:
             action.type = ActionType.CHECK
-            
-        # If action was forced to change, append a note to the thought so it's not confusing
+
+        if action.type == ActionType.RAISE:
+            min_raise_to = self.highest_bet + self.min_bet
+            raise_to = max(min_raise_to, action.amount)
+            required = raise_to - curr_player.current_bet
+            if required <= 0:
+                action.type = ActionType.CHECK if self.highest_bet == curr_player.current_bet else ActionType.CALL
+            elif curr_player.chips < required:
+                action.type = ActionType.CALL
+            else:
+                action.amount = raise_to
+
         if action.type != original_type:
             curr_player.thought = f"[{action.type.value}] {thought}"
         else:
             curr_player.thought = thought
-        
+
         if action.type == ActionType.FOLD:
-             curr_player.last_action = "Fold"
-             curr_player.is_active = False 
-             log_entry = f"{curr_player.name} folds"
-             # Check for early win (Fold Equity)
-             active_players = [p for p in self.players if p.is_active]
-             if len(active_players) == 1:
-                 # Winner determined immediately
-                 self.logs.append(log_entry)
-                 self._determine_winner()
-                 return self.get_state()
-                 
+            curr_player.last_action = "Fold"
+            log_entry = f"{curr_player.name} folds"
         elif action.type == ActionType.CHECK:
-             curr_player.last_action = "Check"
-             log_entry = f"{curr_player.name} checks"
-
+            curr_player.last_action = "Check"
+            log_entry = f"{curr_player.name} checks"
         elif action.type == ActionType.CALL:
-             to_call = self.highest_bet - curr_player.current_bet
-             amount = min(curr_player.chips, to_call)
-             curr_player.last_action = f"Call ${amount}"
-             log_entry = f"{curr_player.name} calls ${amount}"
-             if amount < to_call:
-                 log_entry = f"{curr_player.name} calls ${amount} (all-in)"
-        
+            to_call = max(0, self.highest_bet - curr_player.current_bet)
+            amount = min(curr_player.chips, to_call)
+            curr_player.last_action = f"Call ${amount}"
+            log_entry = f"{curr_player.name} calls ${amount}"
+            if amount < to_call:
+                log_entry = f"{curr_player.name} calls ${amount} (all-in)"
         elif action.type == ActionType.RAISE:
-             # Calculate raise details
-             min_bet_needed = self.highest_bet + self.min_bet
-             # Use larger of (agent provided amount) or (min raise)
-             raise_to = max(min_bet_needed, action.amount)
-             
-             # Can player afford it?
-             if curr_player.chips >= (raise_to - curr_player.current_bet):
-                 curr_player.last_action = f"Raise to ${raise_to}"
-                 log_entry = f"{curr_player.name} raises to ${raise_to}"
-             else:
-                 # Not enough to raise, fallback to Call
-                 action.type = ActionType.CALL
-                 to_call = self.highest_bet - curr_player.current_bet
-                 amount = min(curr_player.chips, to_call)
-                 curr_player.last_action = f"Call ${amount}"
-                 log_entry = f"{curr_player.name} calls ${amount} (all-in)"
+            curr_player.last_action = f"Raise to ${action.amount}"
+            log_entry = f"{curr_player.name} raises to ${action.amount}"
+        else:
+            curr_player.last_action = "Check"
+            log_entry = f"{curr_player.name} checks"
+            action.type = ActionType.CHECK
 
-        # 4. Apply Corrected Action
         self._apply_action(curr_player, action)
-        
-        # Append full log
-        self.logs.append(log_entry)
-        
-        # 4. Move Next or Next Stage
-        # If this player RAISED, update last_raiser
+        self._log(log_entry)
+
+        self.pending_to_act.discard(curr_player.id)
         if action.type == ActionType.RAISE:
             self.last_raiser_idx = curr_player.id
-            
-        # Check if round is done
-        next_idx = (self.current_player_idx + 1) % self.n_players
-        
-        # Special case: If we just acted, and now the NEXT player is the last_raiser_idx, 
-        # and everyone is equal... logic is tricky. 
-        # Alternate: Track "players to act".
-        # Let's use: if next active player == last_raiser_idx, AND everyone balanced -> Next Stage.
-        
-        if next_idx == self.last_raiser_idx:
-             # Everyone had a chance?
-             # Check if all active players matched highest_bet
-             all_matched = True
-             for p in self.players:
-                 if p.is_active and not p.is_all_in and p.current_bet < self.highest_bet:
-                     all_matched = False
-                     break
-             
-             if all_matched:
-                 self.next_stage()
-                 return self.get_state()
+            self.pending_to_act = {
+                p.id
+                for p in self.players
+                if self._can_player_act(p) and p.id != curr_player.id
+            }
 
-        # Advance
+        active_players = self._active_players()
+        if len(active_players) == 1:
+            self._determine_winner()
+            return self.get_state()
+
+        if self._is_betting_round_complete():
+            self.next_stage()
+            return self.get_state()
+
+        next_idx = self._find_next_actor(self.current_player_idx)
+        if next_idx is None:
+            self._runout_to_showdown()
+            return self.get_state()
+
         self.current_player_idx = next_idx
-        self._advance_to_active_player()
-        
         return self.get_state()
 
     def _apply_action(self, player: Player, action: PlayerAction):
-        # Validation / Forced Correction
         if action.type == ActionType.FOLD:
             player.is_active = False
+            player.last_action = "Fold"
+            self.pending_to_act.discard(player.id)
+            return
         elif action.type == ActionType.CHECK:
-            if player.current_bet < self.highest_bet:
-                # Cannot check if bet > current, force CALL
-                action.type = ActionType.CALL
-                
+            return
+
         if action.type == ActionType.CALL:
             to_call = self.highest_bet - player.current_bet
             amount = min(player.chips, to_call)
@@ -255,27 +312,28 @@ class Engine:
             player.current_bet += amount
             self.pot += amount
             player.total_hand_bet += amount
-            if amount < to_call:
+            if player.chips == 0:
                 player.is_all_in = True
-                
+            return
+
         elif action.type == ActionType.RAISE:
-            # Min raise = 2x previous raise diff... simplified to min_bet
-            # Force raise to be at least highest + min_bet
-            # Simple Agent might set type RAISE but 0 amount
-            min_raise = self.highest_bet + self.min_bet
-            amount_needed = min_raise - player.current_bet
-            
+            min_raise_to = self.highest_bet + self.min_bet
+            raise_to = max(min_raise_to, action.amount)
+            amount_needed = raise_to - player.current_bet
+
+            if amount_needed <= 0:
+                return
+
             if player.chips >= amount_needed:
                 player.chips -= amount_needed
                 player.current_bet += amount_needed
                 self.pot += amount_needed
                 player.total_hand_bet += amount_needed
                 self.highest_bet = player.current_bet
-                # self.last_raiser_idx = player.id (handled in step)
+                if player.chips == 0:
+                    player.is_all_in = True
             else:
-                # Not enough to raise -> All In Call
                 self._apply_action(player, PlayerAction(type=ActionType.CALL))
-
 
     def next_stage(self):
         if self.stage == GameStage.PREFLOP:
@@ -290,36 +348,118 @@ class Engine:
         elif self.stage == GameStage.RIVER:
             self.stage = GameStage.SHOWDOWN
             self._determine_winner()
-            return # End
-            
+            return
+
         # Reset Round State
         self.highest_bet = 0
         for p in self.players:
             p.current_bet = 0
-            # Optional: Clear last action on new street? Or keep until next act?
-            # Keeping it helps see history. But "Blind" from Preflop lingering in River is bad.
-            # Let's clear it.
             p.last_action = ""
-        
+
         # Action starts after button
-        self.current_player_idx = (self.dealer_idx + 1) % self.n_players
-        self._advance_to_active_player()
-        self.last_raiser_idx = self.current_player_idx # First to act is now the pivot
+        self._reset_betting_round()
+        next_actor = self._find_next_actor(self.dealer_idx)
+        if next_actor is None:
+            self._runout_to_showdown()
+            return
+        self.current_player_idx = next_actor
+        self.last_raiser_idx = self.current_player_idx
+
+    def _runout_to_showdown(self):
+        if self.stage == GameStage.SHOWDOWN:
+            return
+
+        while len(self.community_cards) < 5:
+            self.community_cards.append(self.deck.pop())
+
+        self.stage = GameStage.SHOWDOWN
+        self._determine_winner()
+
+    def _to_treys_card(self, card: Card) -> int:
+        return TreysCard.new(f"{card.rank}{card.suit}")
+
+    def _build_side_pots(self) -> List[Tuple[int, List[int]]]:
+        contributions = {p.id: p.total_hand_bet for p in self.players if p.total_hand_bet > 0}
+        if not contributions:
+            active_ids = [p.id for p in self._active_players()]
+            return [(self.pot, active_ids)] if active_ids else []
+
+        levels = sorted(set(contributions.values()))
+        prev = 0
+        side_pots: List[Tuple[int, List[int]]] = []
+        for level in levels:
+            participants = [pid for pid, amt in contributions.items() if amt >= level]
+            pot_amount = (level - prev) * len(participants)
+            prev = level
+            if pot_amount <= 0:
+                continue
+            eligible = [pid for pid in participants if self.players[pid].is_active]
+            if eligible:
+                side_pots.append((pot_amount, eligible))
+        return side_pots
+
+    def _split_pot(self, amount: int, winner_ids: List[int], payouts: Dict[int, int]):
+        if amount <= 0 or not winner_ids:
+            return
+
+        start = (self.dealer_idx + 1) % self.n_players
+        ordered_winners = sorted(winner_ids, key=lambda pid: (pid - start) % self.n_players)
+        base = amount // len(ordered_winners)
+        remainder = amount % len(ordered_winners)
+        for winner_id in ordered_winners:
+            payouts[winner_id] += base
+        for i in range(remainder):
+            payouts[ordered_winners[i]] += 1
 
     def _determine_winner(self):
-        active = [p for p in self.players if p.is_active]
-        if not active: return
-        winner = random.choice(active) # TODO: Real eval
-        winner.chips += self.pot
-        winner.stats["wins"] += 1
-        self.logs.append(f"🏆 {winner.name} wins ${self.pot}!")
-        self.winners = [winner.id]
-        
-        # Update hands played for all who participated (simplified: all players)
+        active = self._active_players()
+        if not active:
+            return
+
+        payouts: Dict[int, int] = defaultdict(int)
+        if len(active) == 1:
+            payouts[active[0].id] = self.pot
+        elif self.evaluator and TreysCard and len(self.community_cards) == 5:
+            board = [self._to_treys_card(c) for c in self.community_cards]
+            scores: Dict[int, int] = {}
+            for player in active:
+                hand = [self._to_treys_card(c) for c in player.cards]
+                scores[player.id] = self.evaluator.evaluate(board, hand)
+
+            side_pots = self._build_side_pots()
+            distributed = 0
+            for pot_amount, eligible_ids in side_pots:
+                eligible_scores = {pid: scores[pid] for pid in eligible_ids if pid in scores}
+                if not eligible_scores:
+                    continue
+                best_score = min(eligible_scores.values())
+                pot_winners = [pid for pid, score in eligible_scores.items() if score == best_score]
+                self._split_pot(pot_amount, pot_winners, payouts)
+                distributed += pot_amount
+
+            if distributed < self.pot:
+                best_score = min(scores.values())
+                fallback_winners = [pid for pid, score in scores.items() if score == best_score]
+                self._split_pot(self.pot - distributed, fallback_winners, payouts)
+        else:
+            winner = random.choice(active)
+            payouts[winner.id] = self.pot
+            self._log("evaluator unavailable, winner selected randomly.")
+
+        for player_id, amount in payouts.items():
+            self.players[player_id].chips += amount
+
+        self.winners = sorted([pid for pid, amount in payouts.items() if amount > 0])
+        for winner_id in self.winners:
+            self.players[winner_id].stats["wins"] += 1
+            self._log(f"{self.players[winner_id].name} wins ${payouts[winner_id]}!")
+
         for p in self.players:
-            p.stats["hands_played"] += 1
-            
+            if p.total_hand_bet > 0:
+                p.stats["hands_played"] += 1
+
         self.pot = 0
+        self.pending_to_act = set()
 
     def get_state(self) -> GameState:
         return GameState(

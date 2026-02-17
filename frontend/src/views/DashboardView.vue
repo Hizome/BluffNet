@@ -1,24 +1,105 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import type { GameState, Player } from '../types'
+import type { AgentRuntimeConfig, GameState, LLMProfileInfo, Player } from '../types'
 
 const players = ref<Player[]>([])
+const agents = ref<AgentRuntimeConfig[]>([])
+const llmProfiles = ref<LLMProfileInfo[]>([])
+const draftAgentConfig = ref<Record<number, { agent_type: string; profile: string }>>({})
 const loading = ref(true)
+const TABLE_ID_KEY = 'bluffnet_table_id'
+
+const ensureTableId = () => {
+  let id = localStorage.getItem(TABLE_ID_KEY)
+  if (!id) {
+    id = (crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`)
+    localStorage.setItem(TABLE_ID_KEY, id)
+  }
+  return id
+}
+
+const tableId = ensureTableId()
+const apiUrl = (path: string) => `http://localhost:8000${path}?table_id=${encodeURIComponent(tableId)}`
 
 const fetchState = async () => {
   try {
-    const res = await fetch('http://localhost:8000/state')
+    const res = await fetch(apiUrl('/state'))
     const data: GameState = await res.json()
     players.value = data.players
+    for (const p of data.players) {
+      if (!draftAgentConfig.value[p.id]) {
+        draftAgentConfig.value[p.id] = { agent_type: 'random', profile: '' }
+      }
+    }
     loading.value = false
   } catch (e) {
     console.error(e)
   }
 }
 
+const ensureDraftConfig = (playerId: number) => {
+  if (!draftAgentConfig.value[playerId]) {
+    draftAgentConfig.value[playerId] = { agent_type: 'random', profile: '' }
+  }
+  return draftAgentConfig.value[playerId]
+}
+
+const fetchAgentConfigs = async () => {
+  try {
+    const res = await fetch(apiUrl('/config/agents'))
+    if (!res.ok) return
+    const data = await res.json()
+    agents.value = (data.agents || []) as AgentRuntimeConfig[]
+    for (const a of agents.value) {
+      draftAgentConfig.value[a.player_id] = {
+        agent_type: a.agent_type,
+        profile: a.profile || ''
+      }
+    }
+  } catch (e) {
+    console.error(e)
+  }
+}
+
+const fetchProfiles = async () => {
+  try {
+    const res = await fetch('http://localhost:8000/config/llm_profiles')
+    if (!res.ok) return
+    const data = await res.json()
+    llmProfiles.value = (data.profiles || []) as LLMProfileInfo[]
+  } catch (e) {
+    console.error(e)
+  }
+}
+
+const updateAgent = async (player: Player) => {
+  const draft = draftAgentConfig.value[player.id]
+  if (!draft) return
+  try {
+    const payload = {
+      player_id: player.id,
+      agent_type: draft.agent_type,
+      profile: draft.agent_type === 'llm' && draft.profile.trim() ? draft.profile.trim() : null
+    }
+    const res = await fetch(apiUrl('/config/agent'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    if (!res.ok) {
+      alert('Failed to update agent config')
+      return
+    }
+    await fetchAgentConfigs()
+    alert(`Updated Agent ${player.id + 1} config`)
+  } catch (e) {
+    alert('Error updating agent config')
+  }
+}
+
 const updatePersona = async (player: Player) => {
     try {
-        const res = await fetch('http://localhost:8000/config/persona', {
+        const res = await fetch(apiUrl('/config/persona'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ player_id: player.id, persona: player.persona })
@@ -32,6 +113,8 @@ const updatePersona = async (player: Player) => {
 
 onMounted(() => {
     fetchState()
+    fetchAgentConfigs()
+    fetchProfiles()
 })
 </script>
 
@@ -72,7 +155,41 @@ onMounted(() => {
             <h3 class="text-lg font-bold text-gray-300 mb-4 border-b border-gray-600 pb-2">Agent Configuration</h3>
             <div class="space-y-4">
                 <div v-for="p in players" :key="p.id" class="flex flex-col gap-1">
-                    <label class="text-xs text-gray-500 uppercase font-bold">{{ p.name }} Persona / Prompt</label>
+                    <label class="text-xs text-gray-500 uppercase font-bold">{{ p.name }} Agent Type / Profile</label>
+                    <div class="grid grid-cols-12 gap-2">
+                        <select
+                          v-model="ensureDraftConfig(p.id).agent_type"
+                          class="col-span-4 bg-gray-900 border border-gray-600 rounded px-2 py-2 text-sm focus:border-green-500 focus:outline-none transition-colors"
+                        >
+                          <option value="llm">llm</option>
+                          <option value="random">random</option>
+                          <option value="call_station">call_station</option>
+                        </select>
+                        <input
+                          v-model="ensureDraftConfig(p.id).profile"
+                          type="text"
+                          list="llm-profile-options"
+                          :disabled="ensureDraftConfig(p.id).agent_type !== 'llm'"
+                          placeholder="default / AI1 / GEMINI..."
+                          class="col-span-6 bg-gray-900 border border-gray-600 rounded px-3 py-2 text-sm focus:border-green-500 focus:outline-none transition-colors disabled:opacity-50"
+                        />
+                        <button @click="updateAgent(p)" class="col-span-2 px-3 py-1 bg-gray-700 hover:bg-green-600 text-xs rounded transition-colors text-white">Save</button>
+                    </div>
+                    <div class="text-[11px] text-gray-500">
+                      当前:
+                      <span class="text-gray-300">{{ agents.find(a => a.player_id === p.id)?.agent_type || 'unknown' }}</span>
+                      <template v-if="agents.find(a => a.player_id === p.id)?.profile">
+                        /
+                        <span class="text-gray-300">{{ agents.find(a => a.player_id === p.id)?.profile }}</span>
+                      </template>
+                      <template v-if="agents.find(a => a.player_id === p.id)?.llm">
+                        |
+                        <span :class="agents.find(a => a.player_id === p.id)?.llm?.has_api_key ? 'text-green-400' : 'text-red-400'">
+                          key: {{ agents.find(a => a.player_id === p.id)?.llm?.has_api_key ? 'yes' : 'no' }}
+                        </span>
+                      </template>
+                    </div>
+                    <label class="text-xs text-gray-500 uppercase font-bold mt-1">{{ p.name }} Persona / Prompt</label>
                     <div class="flex gap-2">
                         <input v-model="p.persona" type="text" class="flex-1 bg-gray-900 border border-gray-600 rounded px-3 py-2 text-sm focus:border-green-500 focus:outline-none transition-colors" />
                         <button @click="updatePersona(p)" class="px-3 py-1 bg-gray-700 hover:bg-green-600 text-xs rounded transition-colors text-white">Save</button>
@@ -81,5 +198,8 @@ onMounted(() => {
             </div>
         </div>
     </div>
+    <datalist id="llm-profile-options">
+      <option v-for="profile in llmProfiles" :key="profile.profile" :value="profile.profile" />
+    </datalist>
   </div>
 </template>

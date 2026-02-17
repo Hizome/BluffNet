@@ -32,3 +32,17 @@ export interface GameState {
     logs: string[]
     winners: number[]
 }
+
+export interface LLMProfileInfo {
+    profile: string
+    model: string
+    base_url: string
+    has_api_key: boolean
+}
+
+export interface AgentRuntimeConfig {
+    player_id: number
+    agent_type: string
+    profile: string | null
+    llm?: LLMProfileInfo
+}

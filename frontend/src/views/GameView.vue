@@ -6,6 +6,19 @@ const backendStatus = ref('Connecting...')
 const godMode = ref(false)
 const gameState = ref<GameState | null>(null)
 let pollInterval: number | null = null
+const TABLE_ID_KEY = 'bluffnet_table_id'
+
+const ensureTableId = () => {
+  let id = localStorage.getItem(TABLE_ID_KEY)
+  if (!id) {
+    id = (crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`)
+    localStorage.setItem(TABLE_ID_KEY, id)
+  }
+  return id
+}
+
+const tableId = ensureTableId()
+const apiUrl = (path: string) => `http://localhost:8000${path}?table_id=${encodeURIComponent(tableId)}`
 
 // Suit Mapping
 const suitMap: Record<string, { symbol: string, color: string }> = {
@@ -19,10 +32,31 @@ const getCardColor = (suit: string) => suitMap[suit]?.color || 'text-black'
 const getCardSymbol = (suit: string) => suitMap[suit]?.symbol || suit
 
 const isProcessing = ref(false)
+const pinnedThoughtPlayerId = ref<number | null>(null)
+const autoMode = ref(false)
+let autoTickTimer: number | null = null
+const AUTO_RETRY_DELAY_MS = 400
+const AUTO_AFTER_RESTART_DELAY_MS = 1800
+const AUTO_STEP_DELAY_MS = 1700
+
+const clearAutoTimer = () => {
+  if (autoTickTimer !== null) {
+    clearTimeout(autoTickTimer)
+    autoTickTimer = null
+  }
+}
+
+const scheduleAutoTick = (delayMs = 0) => {
+  clearAutoTimer()
+  if (!autoMode.value) return
+  autoTickTimer = window.setTimeout(() => {
+    runAutoTick()
+  }, delayMs)
+}
 
 const fetchState = async () => {
   try {
-    const res = await fetch('http://localhost:8000/state')
+    const res = await fetch(apiUrl('/state'))
     if (!res.ok) throw new Error('Network response was not ok') 
     const data: GameState = await res.json()
     gameState.value = data
@@ -36,7 +70,7 @@ const nextStep = async () => {
   if (isProcessing.value) return
   isProcessing.value = true
   try {
-    await fetch('http://localhost:8000/next_step', { method: 'POST' })
+    await fetch(apiUrl('/next_step'), { method: 'POST' })
     await fetchState()
   } finally {
     isProcessing.value = false
@@ -44,8 +78,47 @@ const nextStep = async () => {
 }
 
 const startGame = async () => {
-  await fetch('http://localhost:8000/start_game', { method: 'POST' })
-  fetchState()
+  if (isProcessing.value) return
+  isProcessing.value = true
+  try {
+    await fetch(apiUrl('/start_game'), { method: 'POST' })
+    await fetchState()
+  } finally {
+    isProcessing.value = false
+  }
+}
+
+const runAutoTick = async () => {
+  if (!autoMode.value) return
+  if (isProcessing.value) {
+    scheduleAutoTick(AUTO_RETRY_DELAY_MS)
+    return
+  }
+
+  if (!gameState.value) {
+    await fetchState()
+    scheduleAutoTick(AUTO_RETRY_DELAY_MS)
+    return
+  }
+
+  if (gameState.value.stage === 'SHOWDOWN') {
+    await startGame()
+    scheduleAutoTick(AUTO_AFTER_RESTART_DELAY_MS)
+    return
+  }
+
+  await nextStep()
+  scheduleAutoTick(AUTO_STEP_DELAY_MS)
+}
+
+const toggleAutoMode = () => {
+  autoMode.value = !autoMode.value
+  if (autoMode.value) {
+    // First activation has no previous step to wait for, so kick off immediately.
+    scheduleAutoTick(0)
+    return
+  }
+  clearAutoTimer()
 }
 
 onMounted(() => {
@@ -55,6 +128,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (pollInterval) clearInterval(pollInterval)
+  clearAutoTimer()
 })
 
 const fixedPositions = [
@@ -94,11 +168,19 @@ const getPlayerStyle = (index: number) => {
              <button @click="startGame" class="px-3 py-1 bg-blue-700 rounded hover:bg-blue-600 text-xs text-white transition-colors font-medium">Restart Hand</button>
              <button 
                @click="nextStep" 
-               :disabled="isProcessing"
+               :disabled="isProcessing || autoMode"
                class="px-3 py-1 bg-green-700 rounded hover:bg-green-600 text-xs text-white transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
              >
                <span v-if="isProcessing" class="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
                {{ isProcessing ? 'Processing...' : 'Next Step' }}
+             </button>
+             <button
+               @click="toggleAutoMode"
+               :disabled="isProcessing"
+               class="px-3 py-1 rounded text-xs text-white transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+               :class="autoMode ? 'bg-amber-600 hover:bg-amber-500' : 'bg-gray-700 hover:bg-gray-600'"
+             >
+               Auto: {{ autoMode ? 'ON' : 'OFF' }}
              </button>
         </div>
 
@@ -183,7 +265,10 @@ const getPlayerStyle = (index: number) => {
                 <!-- Thought Bubble -->
                 <div v-if="player.thought" 
                      :key="player.thought"
-                     class="absolute -top-16 left-1/2 -translate-x-1/2 w-48 z-40 thought-bubble-animation">
+                     class="absolute -top-16 left-1/2 -translate-x-1/2 w-48 z-40"
+                     :class="pinnedThoughtPlayerId === player.id ? 'thought-bubble-hold' : 'thought-bubble-animation'"
+                     @mouseenter="pinnedThoughtPlayerId = player.id"
+                     @mouseleave="pinnedThoughtPlayerId = null">
                     <div class="relative bg-white text-black p-2 rounded-xl text-[10px] leading-tight shadow-xl border border-gray-300">
                         {{ player.thought }}
                         <!-- Triangle -->
@@ -260,6 +345,11 @@ const getPlayerStyle = (index: number) => {
 
 .thought-bubble-animation {
   animation: thought-pop-fade 2s forwards;
-  pointer-events: none;
+}
+
+.thought-bubble-hold {
+  animation: none;
+  opacity: 1;
+  transform: translate(-50%, 0) scale(1);
 }
 </style>
