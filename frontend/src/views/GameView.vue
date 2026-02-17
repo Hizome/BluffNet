@@ -34,6 +34,8 @@ const getCardSymbol = (suit: string) => suitMap[suit]?.symbol || suit
 const isProcessing = ref(false)
 const pinnedThoughtPlayerId = ref<number | null>(null)
 const autoMode = ref(false)
+const autoCycleHands = ref(10)
+const autoTargetHandCount = ref<number | null>(null)
 let autoTickTimer: number | null = null
 const AUTO_RETRY_DELAY_MS = 400
 const AUTO_AFTER_RESTART_DELAY_MS = 1800
@@ -88,6 +90,17 @@ const startGame = async () => {
   }
 }
 
+const resetCycle = async () => {
+  if (isProcessing.value) return
+  isProcessing.value = true
+  try {
+    await fetch(apiUrl('/reset_cycle'), { method: 'POST' })
+    await fetchState()
+  } finally {
+    isProcessing.value = false
+  }
+}
+
 const runAutoTick = async () => {
   if (!autoMode.value) return
   if (isProcessing.value) {
@@ -102,7 +115,16 @@ const runAutoTick = async () => {
   }
 
   if (gameState.value.stage === 'SHOWDOWN') {
-    await startGame()
+    const cycleSize = autoCycleHands.value
+    const target = autoTargetHandCount.value
+    const reachedTarget = target !== null && gameState.value.hand_count >= target
+    if (cycleSize > 0 && reachedTarget) {
+      await resetCycle()
+      // After first custom cycle, continue normal loops from fresh Hand #1.
+      autoTargetHandCount.value = cycleSize
+    } else {
+      await startGame()
+    }
     scheduleAutoTick(AUTO_AFTER_RESTART_DELAY_MS)
     return
   }
@@ -114,10 +136,14 @@ const runAutoTick = async () => {
 const toggleAutoMode = () => {
   autoMode.value = !autoMode.value
   if (autoMode.value) {
+    const currentHand = gameState.value?.hand_count ?? 0
+    const cycleSize = autoCycleHands.value
+    autoTargetHandCount.value = currentHand + cycleSize
     // First activation has no previous step to wait for, so kick off immediately.
     scheduleAutoTick(0)
     return
   }
+  autoTargetHandCount.value = null
   clearAutoTimer()
 }
 
@@ -165,6 +191,13 @@ const getPlayerStyle = (index: number) => {
       <!-- Right side: Controls -->
       <div class="flex items-center gap-3">
         <div class="flex gap-2 border-r border-gray-600 pr-3 mr-1">
+             <button
+               @click="resetCycle"
+               :disabled="isProcessing"
+               class="px-3 py-1 bg-red-700 rounded hover:bg-red-600 text-xs text-white transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+             >
+               Full Restart
+             </button>
              <button @click="startGame" class="px-3 py-1 bg-blue-700 rounded hover:bg-blue-600 text-xs text-white transition-colors font-medium">Restart Hand</button>
              <button 
                @click="nextStep" 
@@ -182,6 +215,15 @@ const getPlayerStyle = (index: number) => {
              >
                Auto: {{ autoMode ? 'ON' : 'OFF' }}
              </button>
+             <select
+               v-model.number="autoCycleHands"
+               :disabled="autoMode || isProcessing"
+               class="px-2 py-1 rounded text-xs bg-gray-700 border border-gray-600 text-gray-200 focus:outline-none focus:border-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
+             >
+               <option :value="10">Auto 10</option>
+               <option :value="20">Auto 20</option>
+               <option :value="30">Auto 30</option>
+             </select>
         </div>
 
         <button 

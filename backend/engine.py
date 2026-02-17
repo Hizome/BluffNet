@@ -17,6 +17,7 @@ class Engine:
 
     def __init__(self, n_players=8):
         self.n_players = n_players
+        self.initial_chips = 1000
         self.players: List[Player] = []
         self.community_cards: List[Card] = []
         self.deck = []
@@ -42,7 +43,7 @@ class Engine:
             self.players.append(Player(
                 id=i,
                 name=f"AI {i+1}",
-                chips=1000,
+                chips=self.initial_chips,
                 position=i,
                 persona=f"Agent based on randomized logic {i+1}",
                 last_action="",
@@ -193,6 +194,34 @@ class Engine:
             self.current_player_idx = next_actor
 
         return self.get_state()
+
+    def reset_cycle(self):
+        """Reset chips/logs/hand counter and restart from Hand #1."""
+        self.logs = []
+        self.hand_count = 0
+        self.community_cards = []
+        self.deck = []
+        self.stage = GameStage.PREFLOP
+        self.pot = 0
+        self.highest_bet = 0
+        self.last_raiser_idx = -1
+        self.winners = []
+        self.pending_to_act = set()
+        self.dealer_idx = 0
+        self.current_player_idx = 0
+
+        for p in self.players:
+            p.chips = self.initial_chips
+            p.cards = []
+            p.is_active = True
+            p.is_all_in = False
+            p.current_bet = 0
+            p.last_action = ""
+            p.thought = ""
+            p.total_hand_bet = 0
+            p.stats = {"wins": 0, "hands_played": 0}
+
+        return self.start_new_hand()
 
     def _post_blind(self, player_idx, amount):
         p = self.players[player_idx]
@@ -465,6 +494,7 @@ class Engine:
         return GameState(
             stage=self.stage,
             pot_size=self.pot,
+            hand_count=self.hand_count,
             community_cards=self.community_cards,
             current_player_idx=self.current_player_idx,
             dealer_idx=self.dealer_idx,

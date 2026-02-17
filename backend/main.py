@@ -96,6 +96,13 @@ async def start_game(table_id: str = "default"):
     async with runtime.lock:
         return runtime.engine.start_new_hand()
 
+
+@app.post("/reset_cycle")
+async def reset_cycle(table_id: str = "default"):
+    runtime = get_table_runtime(table_id)
+    async with runtime.lock:
+        return runtime.engine.reset_cycle()
+
 @app.post("/next_step")
 async def next_step(table_id: str = "default"):
     runtime = get_table_runtime(table_id)
