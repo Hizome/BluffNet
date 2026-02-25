@@ -18,7 +18,8 @@ const ensureTableId = () => {
 }
 
 const tableId = ensureTableId()
-const apiUrl = (path: string) => `http://localhost:8000${path}?table_id=${encodeURIComponent(tableId)}`
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '')
+const apiUrl = (path: string) => `${API_BASE_URL}${path}?table_id=${encodeURIComponent(tableId)}`
 
 // Suit Mapping
 const suitMap: Record<string, { symbol: string, color: string }> = {

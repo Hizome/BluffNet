@@ -19,7 +19,8 @@ const ensureTableId = () => {
 }
 
 const tableId = ensureTableId()
-const apiUrl = (path: string) => `http://localhost:8000${path}?table_id=${encodeURIComponent(tableId)}`
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '')
+const apiUrl = (path: string) => `${API_BASE_URL}${path}?table_id=${encodeURIComponent(tableId)}`
 
 const fetchState = async () => {
   try {
@@ -63,7 +64,7 @@ const fetchAgentConfigs = async () => {
 
 const fetchProfiles = async () => {
   try {
-    const res = await fetch('http://localhost:8000/config/llm_profiles')
+    const res = await fetch(`${API_BASE_URL}/config/llm_profiles`)
     if (!res.ok) return
     const data = await res.json()
     llmProfiles.value = (data.profiles || []) as LLMProfileInfo[]

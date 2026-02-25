@@ -1,4 +1,5 @@
 import asyncio
+import os
 from dataclasses import dataclass
 from threading import Lock
 from typing import Dict, List, Optional
@@ -6,17 +7,28 @@ from typing import Dict, List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from dotenv import load_dotenv
 
 from engine import Engine
 from llm_client import LLMClient
 from models import GameState
 
+load_dotenv()
+
 app = FastAPI(title="BluffNet AI Backend")
 
-# Allow CORS for frontend development
+def get_cors_allow_origins() -> List[str]:
+    raw = os.getenv(
+        "CORS_ALLOW_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173",
+    )
+    origins = [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return origins or ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=get_cors_allow_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
