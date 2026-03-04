@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
+import { createEngineGateway } from '../lib/engineGateway'
 import type { GameState } from '../types'
 
 const backendStatus = ref('Connecting...')
@@ -18,8 +19,14 @@ const ensureTableId = () => {
 }
 
 const tableId = ensureTableId()
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '')
-const apiUrl = (path: string) => `${API_BASE_URL}${path}?table_id=${encodeURIComponent(tableId)}`
+const engineGateway = createEngineGateway({
+  tableId,
+  onModeChange: (mode) => {
+    if (mode === 'remote') backendStatus.value = 'Online (Cloud)'
+    else if (mode === 'local') backendStatus.value = 'Local Fallback'
+    else backendStatus.value = 'Connecting...'
+  },
+})
 
 // Suit Mapping
 const suitMap: Record<string, { symbol: string, color: string }> = {
@@ -59,11 +66,10 @@ const scheduleAutoTick = (delayMs = 0) => {
 
 const fetchState = async () => {
   try {
-    const res = await fetch(apiUrl('/state'))
-    if (!res.ok) throw new Error('Network response was not ok') 
-    const data: GameState = await res.json()
+    const data: GameState = await engineGateway.getState()
     gameState.value = data
-    backendStatus.value = 'Online'
+    const mode = engineGateway.getMode()
+    backendStatus.value = mode === 'remote' ? 'Online (Cloud)' : mode === 'local' ? 'Local Fallback' : 'Connecting...'
   } catch (e) {
     backendStatus.value = 'Offline'
   }
@@ -73,8 +79,10 @@ const nextStep = async () => {
   if (isProcessing.value) return
   isProcessing.value = true
   try {
-    await fetch(apiUrl('/next_step'), { method: 'POST' })
-    await fetchState()
+    const data = await engineGateway.nextStep()
+    gameState.value = data
+    const mode = engineGateway.getMode()
+    backendStatus.value = mode === 'remote' ? 'Online (Cloud)' : mode === 'local' ? 'Local Fallback' : 'Connecting...'
   } finally {
     isProcessing.value = false
   }
@@ -84,8 +92,10 @@ const startGame = async () => {
   if (isProcessing.value) return
   isProcessing.value = true
   try {
-    await fetch(apiUrl('/start_game'), { method: 'POST' })
-    await fetchState()
+    const data = await engineGateway.startGame()
+    gameState.value = data
+    const mode = engineGateway.getMode()
+    backendStatus.value = mode === 'remote' ? 'Online (Cloud)' : mode === 'local' ? 'Local Fallback' : 'Connecting...'
   } finally {
     isProcessing.value = false
   }
@@ -95,8 +105,10 @@ const resetCycle = async () => {
   if (isProcessing.value) return
   isProcessing.value = true
   try {
-    await fetch(apiUrl('/reset_cycle'), { method: 'POST' })
-    await fetchState()
+    const data = await engineGateway.resetCycle()
+    gameState.value = data
+    const mode = engineGateway.getMode()
+    backendStatus.value = mode === 'remote' ? 'Online (Cloud)' : mode === 'local' ? 'Local Fallback' : 'Connecting...'
   } finally {
     isProcessing.value = false
   }
@@ -149,13 +161,19 @@ const toggleAutoMode = () => {
 }
 
 onMounted(() => {
-  fetchState()
+  engineGateway.init().then((state) => {
+    gameState.value = state
+  }).catch(() => {
+    backendStatus.value = 'Offline'
+  })
+  engineGateway.startProbe()
   pollInterval = window.setInterval(fetchState, 1500) // Slightly slower poll to avoid overlapping
 })
 
 onUnmounted(() => {
   if (pollInterval) clearInterval(pollInterval)
   clearAutoTimer()
+  engineGateway.stopProbe()
 })
 
 const fixedPositions = [

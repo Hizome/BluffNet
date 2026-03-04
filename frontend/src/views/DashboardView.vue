@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
+import { createEngineGateway } from '../lib/engineGateway'
 import type { AgentRuntimeConfig, GameState, LLMProfileInfo, Player } from '../types'
 
 const players = ref<Player[]>([])
@@ -7,6 +8,9 @@ const agents = ref<AgentRuntimeConfig[]>([])
 const llmProfiles = ref<LLMProfileInfo[]>([])
 const draftAgentConfig = ref<Record<number, { agent_type: string; profile: string }>>({})
 const loading = ref(true)
+const backendStatus = ref('Connecting...')
+const remoteConfigAvailable = ref(false)
+let pollInterval: number | null = null
 const TABLE_ID_KEY = 'bluffnet_table_id'
 
 const ensureTableId = () => {
@@ -21,11 +25,39 @@ const ensureTableId = () => {
 const tableId = ensureTableId()
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '')
 const apiUrl = (path: string) => `${API_BASE_URL}${path}?table_id=${encodeURIComponent(tableId)}`
+const engineGateway = createEngineGateway({
+  tableId,
+  onModeChange: (mode) => {
+    if (mode === 'remote') {
+      backendStatus.value = 'Cloud'
+      remoteConfigAvailable.value = true
+      fetchAgentConfigs()
+      fetchProfiles()
+      return
+    }
+    if (mode === 'local') {
+      backendStatus.value = 'Local fallback'
+      remoteConfigAvailable.value = false
+      return
+    }
+    backendStatus.value = 'Connecting...'
+    remoteConfigAvailable.value = false
+  },
+})
+
+const fetchWithTimeout = async (input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 5000) => {
+  const ctrl = new AbortController()
+  const t = window.setTimeout(() => ctrl.abort(), timeoutMs)
+  try {
+    return await fetch(input, { ...init, signal: ctrl.signal })
+  } finally {
+    clearTimeout(t)
+  }
+}
 
 const fetchState = async () => {
   try {
-    const res = await fetch(apiUrl('/state'))
-    const data: GameState = await res.json()
+    const data: GameState = await engineGateway.getState()
     players.value = data.players
     for (const p of data.players) {
       if (!draftAgentConfig.value[p.id]) {
@@ -33,8 +65,11 @@ const fetchState = async () => {
       }
     }
     loading.value = false
+    const mode = engineGateway.getMode()
+    backendStatus.value = mode === 'remote' ? 'Cloud' : mode === 'local' ? 'Local fallback' : 'Connecting...'
   } catch (e) {
     console.error(e)
+    backendStatus.value = 'Offline'
   }
 }
 
@@ -46,8 +81,9 @@ const ensureDraftConfig = (playerId: number) => {
 }
 
 const fetchAgentConfigs = async () => {
+  if (!remoteConfigAvailable.value) return
   try {
-    const res = await fetch(apiUrl('/config/agents'))
+    const res = await fetchWithTimeout(apiUrl('/config/agents'))
     if (!res.ok) return
     const data = await res.json()
     agents.value = (data.agents || []) as AgentRuntimeConfig[]
@@ -63,8 +99,9 @@ const fetchAgentConfigs = async () => {
 }
 
 const fetchProfiles = async () => {
+  if (!remoteConfigAvailable.value) return
   try {
-    const res = await fetch(`${API_BASE_URL}/config/llm_profiles`)
+    const res = await fetchWithTimeout(`${API_BASE_URL}/config/llm_profiles`)
     if (!res.ok) return
     const data = await res.json()
     llmProfiles.value = (data.profiles || []) as LLMProfileInfo[]
@@ -74,6 +111,10 @@ const fetchProfiles = async () => {
 }
 
 const updateAgent = async (player: Player) => {
+  if (!remoteConfigAvailable.value) {
+    alert('Cloud backend unavailable. Agent config is disabled in local fallback mode.')
+    return
+  }
   const draft = draftAgentConfig.value[player.id]
   if (!draft) return
   try {
@@ -82,7 +123,7 @@ const updateAgent = async (player: Player) => {
       agent_type: draft.agent_type,
       profile: draft.agent_type === 'llm' && draft.profile.trim() ? draft.profile.trim() : null
     }
-    const res = await fetch(apiUrl('/config/agent'), {
+    const res = await fetchWithTimeout(apiUrl('/config/agent'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
@@ -99,8 +140,12 @@ const updateAgent = async (player: Player) => {
 }
 
 const updatePersona = async (player: Player) => {
+    if (!remoteConfigAvailable.value) {
+        alert('Cloud backend unavailable. Persona config is disabled in local fallback mode.')
+        return
+    }
     try {
-        const res = await fetch(apiUrl('/config/persona'), {
+        const res = await fetchWithTimeout(apiUrl('/config/persona'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ player_id: player.id, persona: player.persona })
@@ -113,15 +158,34 @@ const updatePersona = async (player: Player) => {
 }
 
 onMounted(() => {
+    engineGateway.init().then((state) => {
+      players.value = state.players
+      loading.value = false
+    }).catch(() => {
+      backendStatus.value = 'Offline'
+    })
+    engineGateway.startProbe()
     fetchState()
-    fetchAgentConfigs()
-    fetchProfiles()
+    pollInterval = window.setInterval(fetchState, 2000)
+})
+
+onUnmounted(() => {
+  if (pollInterval) clearInterval(pollInterval)
+  engineGateway.stopProbe()
 })
 </script>
 
 <template>
   <div class="h-full p-8 overflow-y-auto">
-    <h2 class="text-2xl font-bold mb-6 text-green-400">📊 Stats & Configuration</h2>
+    <div class="flex items-center justify-between mb-6">
+      <h2 class="text-2xl font-bold text-green-400">📊 Stats & Configuration</h2>
+      <div class="text-xs px-2 py-1 rounded border border-gray-600 text-gray-300">
+        Engine: {{ backendStatus }}
+      </div>
+    </div>
+    <div v-if="!remoteConfigAvailable" class="mb-6 rounded border border-amber-500/50 bg-amber-900/20 px-3 py-2 text-xs text-amber-200">
+      Cloud backend unavailable. Scoreboard works in local fallback mode, but agent/persona configuration is disabled until cloud reconnects.
+    </div>
     
     <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
         <!-- Scoreboard -->
