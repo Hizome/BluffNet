@@ -32,3 +32,6 @@
 
 ## Future Plan
 - 评估并设计 `MiniMax chatcompletion_v2` 的独立接入方案（请求协议、消息角色映射、错误码处理），待需求明确后再实现。
+
+## Recent Updates
+- 2026-03-04: 前端 `GameView` 接入双引擎网关（Remote 优先 + Local fallback），后端冷启动时可立即本地开局，后台自动探测云端恢复并切回。

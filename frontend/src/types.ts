@@ -22,6 +22,7 @@ export interface Player {
 export interface GameState {
     stage: string // PREFLOP, FLOP, etc
     pot_size: number
+    hand_count: number
     community_cards: Card[]
     current_player_idx: number
     dealer_idx: number

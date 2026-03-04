@@ -62,10 +62,14 @@ class LLMAgent(BaseAgent):
         if me.chips > to_call and max_raise_to >= min_raise_to:
             legal_actions.append("RAISE")
 
-        system_prompt = f"""You are a Texas Hold'em poker player. Your persona is: {me.persona}.
-Your goal is to win chips. You must respond in a valid JSON format.
+        system_prompt = f"""You are a fast Texas Hold'em poker player. Your persona is: {me.persona}.
+Decide quickly and return compact JSON only.
+No markdown, no long explanation, no extra text.
 JSON Schema: {{ "action": "FOLD" | "CHECK" | "CALL" | "RAISE", "amount": number, "thought": string }}
-Only choose action from legal_actions. If action is RAISE, set amount within [min_raise_to, max_raise_to].
+Rules:
+- Choose action only from legal_actions.
+- If action is RAISE, set amount within [min_raise_to, max_raise_to].
+- thought must be short (max 50 words). Empty string is allowed.
 """
         state_brief = {
             "stage": game_state.stage,

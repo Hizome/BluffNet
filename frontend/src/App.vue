@@ -1,4 +1,12 @@
 <script setup lang="ts">
+import { onMounted } from 'vue'
+
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '')
+
+onMounted(() => {
+  // Non-blocking warmup ping to reduce first meaningful backend request latency.
+  fetch(`${API_BASE_URL}/status?table_id=default`).catch(() => {})
+})
 </script>
 
 <template>

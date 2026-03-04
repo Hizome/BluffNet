@@ -49,6 +49,7 @@ class Pot(BaseModel):
 class GameState(BaseModel):
     stage: GameStage
     pot_size: int
+    hand_count: int = 0
     community_cards: List[Card]
     current_player_idx: int  # Index in players list
     dealer_idx: int
